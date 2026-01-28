@@ -48,3 +48,8 @@ venv/
 venv/
 .venv/
 __pycache__/
+
+# Runtime logs and artifacts
+logs/
+*.log
+logs/screenshots/
