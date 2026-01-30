@@ -1,1 +1,0 @@
-/var/www/SOLAR/visadash_bot/visa_bot/run_registration.py
