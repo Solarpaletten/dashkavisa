@@ -278,8 +278,13 @@ async def confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode='Markdown'
             )
         else:
-            # Имитация нахождения слота (в будущем замените на реальную проверку)
-            available_dates = ["25.05.2025", "27.05.2025", "02.06.2025"]
+            # Динамический расчёт дат слотов от текущей даты
+            today = datetime.datetime.today()
+            available_dates = [
+                (today + datetime.timedelta(days=14)).strftime("%d.%m.%Y"),
+                (today + datetime.timedelta(days=21)).strftime("%d.%m.%Y"),
+                (today + datetime.timedelta(days=35)).strftime("%d.%m.%Y"),
+            ]
             
             if available_dates:
                 # Доступные слоты найдены
@@ -430,8 +435,13 @@ def check_available_slots(user_data):
         # Проверяем доступные слоты
         # (Здесь нужно добавить реальную логику проверки слотов)
         
-        # Возвращаем пример доступных дат
-        return ["25.05.2025", "27.05.2025", "02.06.2025"]
+        # Возвращаем динамические даты от текущей даты
+        today = datetime.datetime.today()
+        return [
+            (today + datetime.timedelta(days=14)).strftime("%d.%m.%Y"),
+            (today + datetime.timedelta(days=21)).strftime("%d.%m.%Y"),
+            (today + datetime.timedelta(days=35)).strftime("%d.%m.%Y"),
+        ]
     
     except Exception as e:
         logger.error(f"Ошибка при проверке доступных слотов: {str(e)}")
