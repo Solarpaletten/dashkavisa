@@ -32,12 +32,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка учетных данных из .env
-
-
-# Загружаем переменные окружения
-
-
 # URL для страниц VFS Global
 LOGIN_URL = "https://visa.vfsglobal.com/blr/ru/pol/login"
 DASHBOARD_URL = "https://visa.vfsglobal.com/blr/ru/pol/dashboard"
@@ -45,6 +39,7 @@ NEW_BOOKING_URL = "https://visa.vfsglobal.com/blr/ru/pol/book-an-appointment"
 
 # v0.4: Persistent Chrome Profile
 CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".dashkavisa", "chrome_profile")
+
 
 def cleanup_chrome():
     """Очистка процессов Chrome и временных файлов."""
@@ -72,16 +67,19 @@ def cleanup_chrome():
         logger.error(f"Ошибка при очистке Chrome: {str(e)}")
         return False
 
+
 def setup_driver():
     """
     Настраивает и возвращает драйвер браузера Chrome.
     v0.4: Persistent Chrome Profile (~/.dashkavisa/chrome_profile)
+    v0.4.5: cleanup_chrome() removed — human login must not be killed
 
     Returns:
         webdriver.Chrome: Настроенный драйвер Chrome или None в случае ошибки
     """
-    # Очищаем предыдущие процессы Chrome
-    cleanup_chrome()
+    # v0.4.5: НЕ вызываем cleanup_chrome() автоматически
+    # Причина: человек может логиниться в другом окне Chrome
+    # Для принудительной очистки: вызвать cleanup_chrome() вручную
 
     try:
         # v0.4: Persistent директория (НЕ временная)
@@ -93,6 +91,9 @@ def setup_driver():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+        options.add_argument("--profile-directory=Default")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--window-size=1920,1080")
 
@@ -132,6 +133,7 @@ def setup_driver():
         logger.error(f"Ошибка при настройке драйвера: {str(e)}")
         return None
 
+
 def accept_cookies_if_present(driver, logger, timeout=5):
     """
     v0.4.1: Автоматическое принятие cookie-баннера VFS Global.
@@ -156,21 +158,24 @@ def accept_cookies_if_present(driver, logger, timeout=5):
     logger.info("Cookie banner not found — skipping")
     return False
 
+
 def login_vfs_global(driver):
     """
-    v0.4.1: Hybrid Human-Assisted Login (Cloudflare-safe)
+    v0.4.5: Human-in-the-Loop Login (Cloudflare-safe)
 
-    Функция НЕ логинится сама. Проверяет состояние сохранённой сессии.
-    Человек логинится один раз вручную. Бот использует сохранённые cookies.
+    РЕЖИМ A (SESSION CHECK):
+        Open LOGIN_URL → if auto-redirect away from /login → session active → return True
+        ❌ NO manual navigation to dashboard
 
-    Состояния:
-        SUCCESS          → сессия жива, URL не /login → return True
-        WAIT             → Waiting Room до 120с → потом повторная проверка
-        CAPTCHA_REQUIRED → обнаружена капча → лог, return False, браузер НЕ закрывать
-        MANUAL_LOGIN     → форма email/password → лог, return False, браузер НЕ закрывать
+    РЕЖИМ B (MANUAL LOGIN):
+        URL still contains /login → log MANUAL_LOGIN_REQUIRED → return False
+        ❌ NO element scanning
+        ❌ NO dashboard navigation
+        ❌ NO waiting loops
+        Browser stays on login page for human
 
     Returns:
-        bool: True если сессия активна и доступен booking flow, иначе False
+        bool: True if session active, False if human login needed
     """
     try:
         LOGIN_URL = "https://services.vfsglobal.by/blr/ru/pol/login"
@@ -181,177 +186,52 @@ def login_vfs_global(driver):
         # Даём странице начать загрузку
         time.sleep(3)
 
-        # v0.4.1: Принять cookie-баннер (если есть) ДО проверки логина
+        # v0.4.1: Принять cookie-баннер (если есть) ДО проверки
         accept_cookies_if_present(driver, logger)
         time.sleep(1)  # дать DOM обновиться после закрытия баннера
 
         # ============================================================
-        # v0.4.2: SESSION CHECK — пробуем dashboard напрямую
-        # URL > DOM. Если сессия жива — dashboard откроется.
-        # Login form в DOM не является признаком отсутствия сессии.
+        # РЕЖИМ A: SESSION CHECK — только по URL (без навигации)
+        # Если сессия жива, VFS сам редиректит с /login на /dashboard
         # ============================================================
-        DASHBOARD_CHECK_URL = "https://services.vfsglobal.by/blr/ru/pol/dashboard"
-        logger.info(f"Checking active session via dashboard: {DASHBOARD_CHECK_URL}")
-        driver.get(DASHBOARD_CHECK_URL)
-        time.sleep(3)
+        time.sleep(3)  # дать время на возможный auto-redirect
 
-        if "/dashboard" in driver.current_url:
-            logger.info(f"SUCCESS: Active session detected (dashboard)")
-            return True
-
-        # Если dashboard не открылся — вернёмся на login для дальнейших проверок
-        logger.info("Dashboard not accessible, checking login page state...")
-        driver.get(LOGIN_URL)
-        time.sleep(3)
-
-        # ============================================================
-        # КРИТЕРИЙ УСПЕХА №1: URL уже не /login (сессия жива)
-        # ============================================================
         current_url = driver.current_url
-        if "login" not in current_url:
-            logger.info(f"SUCCESS: Session active, redirected to {current_url}")
+        logger.info(f"Current URL after load: {current_url}")
+
+        if "/login" not in current_url:
+            logger.info(f"SESSION_ACTIVE: Auto-redirected to {current_url}")
             return True
 
         # ============================================================
-        # WAITING ROOM: ждём до 120 секунд (БЕЗ взаимодействия)
+        # РЕЖИМ B: MANUAL LOGIN — браузер припаркован для человека
+        # ❌ НЕ навигируем на dashboard
+        # ❌ НЕ сканируем DOM
+        # ❌ НЕ ждём циклически
         # ============================================================
-        waiting_room_timeout = 120
-        waiting_room_start = time.time()
-        waiting_room_detected = False
+        logger.warning("=" * 60)
+        logger.warning("MANUAL_LOGIN_REQUIRED")
+        logger.warning("Login page detected — session expired or first run.")
+        logger.warning("Browser parked for human login.")
+        logger.warning(f"  URL: {LOGIN_URL}")
+        logger.warning(f"  Profile: {CHROME_PROFILE_DIR}")
+        logger.warning("After login, close browser and restart bot.")
+        logger.warning("=" * 60)
 
-        while time.time() - waiting_room_start < waiting_room_timeout:
-            page_source = driver.page_source.lower()
-
-            waiting_room_keywords = [
-                "вы находитесь в очереди",
-                "waiting room",
-                "ожидаемое время ожидания",
-                "expected wait time",
-                "queue-it",
-            ]
-
-            is_waiting_room = any(kw in page_source for kw in waiting_room_keywords)
-
-            if is_waiting_room:
-                if not waiting_room_detected:
-                    waiting_room_detected = True
-                    logger.info("WAIT: Cloudflare Waiting Room detected, waiting up to 120s...")
-
-                time.sleep(5)
-
-                # Проверяем — может уже ушли с /login
-                current_url = driver.current_url
-                if "login" not in current_url:
-                    logger.info(f"SUCCESS: Passed Waiting Room, redirected to {current_url}")
-                    return True
-
-                continue
-            else:
-                # Waiting Room пройден или его не было
-                break
-
-        if waiting_room_detected:
-            elapsed = int(time.time() - waiting_room_start)
-            logger.info(f"Waiting Room phase ended after {elapsed}s")
-
-        # ============================================================
-        # После Waiting Room — проверяем URL ещё раз
-        # ============================================================
-        current_url = driver.current_url
-        if "login" not in current_url:
-            logger.info(f"SUCCESS: Redirected to {current_url}")
-            return True
-
-        # ============================================================
-        # CAPTCHA DETECT (только обнаружение, 0 кликов)
-        # ============================================================
-        page_source = driver.page_source.lower()
-
-        captcha_keywords = [
-            "подтвердите, что вы человек",
-            "verify you are human",
-            "cf-challenge",
-            "cf-turnstile",
-            "captcha",
-            "challenge-platform",
-            "challenge-form",
-        ]
-
-        # Проверяем iframe Cloudflare
-        captcha_iframes = driver.find_elements(By.CSS_SELECTOR,
-            "iframe[src*='challenges'], iframe[src*='captcha'], iframe[src*='cf-'], iframe[src*='turnstile']")
-
-        is_captcha = any(kw in page_source for kw in captcha_keywords) or len(captcha_iframes) > 0
-
-        if is_captcha:
-            logger.warning("=" * 60)
-            logger.warning("CAPTCHA_REQUIRED")
-            logger.warning("Cloudflare CAPTCHA detected.")
-            logger.warning("Please solve CAPTCHA manually in the browser window.")
-            logger.warning("Then restart: python automation/browser.py")
-            logger.warning("Browser left open intentionally.")
-            logger.warning("=" * 60)
-            # Скриншот
-            screenshot_path = os.path.join(screenshots_dir, f"captcha_detected_{int(time.time())}.png")
-            try:
-                driver.save_screenshot(screenshot_path)
-                logger.info(f"Screenshot: {screenshot_path}")
-            except:
-                pass
-            return False
-
-        # ============================================================
-        # LOGIN FORM DETECT (сессия истекла → ручной логин)
-        # ============================================================
-        login_form_selectors = [
-            "input[type='email']",
-            "input[type='password']",
-            "#mat-input-0",
-        ]
-
-        login_form_found = False
-        for selector in login_form_selectors:
-            try:
-                driver.find_element(By.CSS_SELECTOR, selector)
-                login_form_found = True
-                break
-            except:
-                continue
-
-        if login_form_found:
-            logger.warning("=" * 60)
-            logger.warning("MANUAL_LOGIN_REQUIRED")
-            logger.warning("Login form detected — session expired or first run.")
-            logger.warning("Please login manually in the browser window:")
-            logger.warning(f"  URL: {LOGIN_URL}")
-            logger.warning(f"  Profile: {CHROME_PROFILE_DIR}")
-            logger.warning("After login, close browser and restart bot.")
-            logger.warning("=" * 60)
-            # Скриншот
-            screenshot_path = os.path.join(screenshots_dir, f"login_form_detected_{int(time.time())}.png")
-            try:
-                driver.save_screenshot(screenshot_path)
-                logger.info(f"Screenshot: {screenshot_path}")
-            except:
-                pass
-            return False
-
-        # ============================================================
-        # UNKNOWN STATE — ничего не распознано
-        # ============================================================
-        logger.warning(f"UNKNOWN_STATE: URL={current_url}")
-        logger.warning("Could not determine page state. Check screenshot.")
-        screenshot_path = os.path.join(screenshots_dir, f"unknown_state_{int(time.time())}.png")
+        # Скриншот текущего состояния
+        screenshot_path = os.path.join(screenshots_dir, f"waiting_for_human_{int(time.time())}.png")
         try:
             driver.save_screenshot(screenshot_path)
             logger.info(f"Screenshot: {screenshot_path}")
         except:
             pass
+
         return False
 
     except Exception as e:
         logger.exception(f"Login check error: {e}")
         return False
+
 
 def start_new_appointment(driver):
     """
@@ -469,53 +349,44 @@ def start_new_appointment(driver):
                 EC.presence_of_element_located((By.XPATH, "//input[@formcontrolname='dateOfBirth']"))
             )
             birth_date_input.clear()
-            birth_date_input.send_keys(config.USER_BIRTH_DATE)
-            logger.info(f"Введена дата рождения: {config.USER_BIRTH_DATE}")
+            birth_date_input.send_keys(os.getenv("USER_BIRTH_DATE", "06/09/1957"))
+            logger.info(f"Введена дата рождения: {os.getenv('USER_BIRTH_DATE', '06/09/1957')}")
             time.sleep(1)
         except Exception as e:
             logger.warning(f"Ошибка при вводе даты рождения: {str(e)}")
-            # Возможно, дата уже введена или поле не требуется на этом этапе
+            # Возможно, дата уже введена или поле не обязательно
 
-        # Проверяем наличие сообщения о доступности слотов
+        # Нажимаем кнопку "Продолжить" для перехода к выбору даты
         try:
-            # Ищем сообщение о недоступности слотов
-            no_slots_message = driver.find_element(By.XPATH,
-                "//div[contains(text(), 'нет доступных слотов') or contains(text(), 'Приносим извинения')]")
-            logger.info(f"Найдено сообщение об отсутствии слотов: {no_slots_message.text}")
-            # Сохраняем скриншот страницы с сообщением
-            screenshot_path = os.path.join(screenshots_dir, f"no_slots_message_{int(time.time())}.png")
-            driver.save_screenshot(screenshot_path)
-        except:
-            # Если сообщение не найдено, возможно, есть доступные слоты
-            logger.info("Сообщение об отсутствии слотов не найдено, возможно, есть доступные даты")
-
-        # Нажимаем на кнопку "Продолжить", если она есть
-        try:
-            continue_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Продолжить')]"))
+            continue_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Продолжить') or contains(text(), 'Continue') or contains(text(), 'Submit')]"))
             )
             continue_button.click()
             logger.info("Нажата кнопка 'Продолжить'")
-            time.sleep(2)
-        except:
-            logger.warning("Кнопка 'Продолжить' не найдена или недоступна")
+            time.sleep(3)
+        except Exception as e:
+            logger.warning(f"Ошибка при нажатии кнопки 'Продолжить': {str(e)}")
 
-        # Если мы дошли до этого места, считаем, что начало записи успешно
-        logger.info("Процесс поиска слотов запущен успешно")
+        # Делаем скриншот после заполнения формы
+        screenshot_path = os.path.join(screenshots_dir, f"form_submitted_{int(time.time())}.png")
+        driver.save_screenshot(screenshot_path)
+        logger.info("Форма записи отправлена")
+
         return True
 
     except Exception as e:
-        logger.error(f"Ошибка при начале записи: {str(e)}")
-        error_screenshot = os.path.join(screenshots_dir, f"booking_error_{int(time.time())}.png")
+        logger.error(f"Ошибка при начале новой записи: {str(e)}")
+        error_screenshot = os.path.join(screenshots_dir, f"appointment_error_{int(time.time())}.png")
         try:
             driver.save_screenshot(error_screenshot)
         except:
             pass
         return False
 
+
 def check_available_dates(driver):
     """
-    Проверяет доступные даты для записи на прием.
+    Проверяет доступные даты для записи на приём.
 
     Args:
         driver (webdriver.Chrome): Драйвер Chrome
@@ -554,8 +425,6 @@ def check_available_dates(driver):
 
             # Ищем все доступные дни (не заблокированные)
             available_dates = []
-
-            # Проверяем доступные даты различными способами (под разные версии UI)
 
             # Способ 1: Ищем стандартные ячейки календаря
             try:
@@ -620,7 +489,6 @@ def check_available_dates(driver):
             logger.warning(f"Ошибка при поиске календаря: {str(e)}")
 
             # Если календарь не найден, это может означать, что доступных дат нет
-            # или что сайт показал сообщение об отсутствии слотов
             screenshot_path = os.path.join(screenshots_dir, f"no_calendar_{int(time.time())}.png")
             driver.save_screenshot(screenshot_path)
 
@@ -635,16 +503,17 @@ def check_available_dates(driver):
             pass
         return False, str(e)
 
+
 def fill_personal_data(driver, first_name, last_name, birth_date):
     """
     Заполняет личные данные в форме записи.
-    
+
     Args:
         driver (webdriver.Chrome): Драйвер Chrome
         first_name (str): Имя
         last_name (str): Фамилия
         birth_date (str): Дата рождения в формате DD.MM.YYYY
-        
+
     Returns:
         bool: True, если данные успешно заполнены, иначе False
     """
@@ -653,20 +522,20 @@ def fill_personal_data(driver, first_name, last_name, birth_date):
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input[formcontrolname='firstName']"))
         )
-        
+
         # Заполняем поля формы
         first_name_input = driver.find_element(By.CSS_SELECTOR, "input[formcontrolname='firstName']")
         last_name_input = driver.find_element(By.CSS_SELECTOR, "input[formcontrolname='lastName']")
-        
+
         # Очищаем поля и заполняем новыми данными
         first_name_input.clear()
         first_name_input.send_keys(first_name)
         logger.info(f"Введено имя: {first_name}")
-        
+
         last_name_input.clear()
         last_name_input.send_keys(last_name)
         logger.info(f"Введена фамилия: {last_name}")
-        
+
         # Ищем поле для даты рождения (может иметь разный формат ввода)
         try:
             # Вариант 1: Если это обычное текстовое поле
@@ -678,22 +547,22 @@ def fill_personal_data(driver, first_name, last_name, birth_date):
             birth_date_input = driver.find_element(By.CSS_SELECTOR, "input.mat-datepicker-input")
             birth_date_input.clear()
             birth_date_input.send_keys(birth_date)
-        
+
         logger.info(f"Введена дата рождения: {birth_date}")
-        
+
         # Сохраняем скриншот заполненной формы
         screenshot_path = os.path.join(screenshots_dir, f"personal_data_form_{int(time.time())}.png")
         driver.save_screenshot(screenshot_path)
-        
+
         # Нажимаем кнопку продолжения
         continue_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Продолжить') or contains(text(), 'Continue')]"))
         )
         continue_button.click()
         logger.info("Нажата кнопка продолжения после заполнения личных данных")
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Ошибка при заполнении личных данных: {str(e)}")
         error_screenshot = os.path.join(screenshots_dir, f"personal_data_error_{int(time.time())}.png")
@@ -703,28 +572,29 @@ def fill_personal_data(driver, first_name, last_name, birth_date):
             pass
         return False
 
+
 # Тест функций, если скрипт запущен напрямую
 if __name__ == "__main__":
     try:
         print("Тестирование функций для работы с браузером...")
-        
+
         # Настраиваем драйвер
         driver = setup_driver()
-        
+
         if driver:
             print("✅ Драйвер успешно настроен")
-            
+
             # Выполняем вход
             logged_in = login_vfs_global(driver)
-            
+
             if logged_in:
                 print("✅ Вход в VFS Global выполнен успешно")
                 print("SESSION_ACTIVE → CONTINUE")
-                
+
                 # Начинаем новую запись
                 if start_new_appointment(driver):
                     print("✅ Новая запись успешно начата")
-                    
+
                     # Проверяем доступные даты
                     success, result = check_available_dates(driver)
                     if success:
@@ -738,7 +608,7 @@ if __name__ == "__main__":
                         print(f"❌ Ошибка при проверке дат: {result}")
                 else:
                     print("❌ Не удалось начать новую запись")
-                
+
                 # Освобождаем ресурсы ТОЛЬКО при успешном логине
                 driver.quit()
                 print("✅ Драйвер закрыт")
@@ -749,6 +619,6 @@ if __name__ == "__main__":
                 # ВАЖНО: НЕ закрываем driver
         else:
             print("❌ Не удалось настроить драйвер")
-            
+
     except Exception as e:
         print(f"❌ Критическая ошибка при тестировании: {str(e)}")
