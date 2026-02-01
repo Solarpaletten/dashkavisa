@@ -469,8 +469,8 @@ def start_new_appointment(driver):
                 EC.presence_of_element_located((By.XPATH, "//input[@formcontrolname='dateOfBirth']"))
             )
             birth_date_input.clear()
-            birth_date_input.send_keys(os.getenv("USER_BIRTH_DATE", "06/09/1957"))
-            logger.info(f"Введена дата рождения: {os.getenv('USER_BIRTH_DATE', '06/09/1957')}")
+            birth_date_input.send_keys(config.USER_BIRTH_DATE)
+            logger.info(f"Введена дата рождения: {config.USER_BIRTH_DATE}")
             time.sleep(1)
         except Exception as e:
             logger.warning(f"Ошибка при вводе даты рождения: {str(e)}")
