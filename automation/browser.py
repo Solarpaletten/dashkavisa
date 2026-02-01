@@ -706,17 +706,20 @@ def fill_personal_data(driver, first_name, last_name, birth_date):
 # Тест функций, если скрипт запущен напрямую
 if __name__ == "__main__":
     try:
-        # Тестируем функции
         print("Тестирование функций для работы с браузером...")
         
         # Настраиваем драйвер
         driver = setup_driver()
+        
         if driver:
             print("✅ Драйвер успешно настроен")
             
             # Выполняем вход
-            if login_vfs_global(driver):
+            logged_in = login_vfs_global(driver)
+            
+            if logged_in:
                 print("✅ Вход в VFS Global выполнен успешно")
+                print("SESSION_ACTIVE → CONTINUE")
                 
                 # Начинаем новую запись
                 if start_new_appointment(driver):
@@ -735,12 +738,15 @@ if __name__ == "__main__":
                         print(f"❌ Ошибка при проверке дат: {result}")
                 else:
                     print("❌ Не удалось начать новую запись")
-            else:
-                print("❌ Не удалось войти в VFS Global")
                 
-            # Освобождаем ресурсы
-            driver.quit()
-            print("✅ Драйвер закрыт")
+                # Освобождаем ресурсы ТОЛЬКО при успешном логине
+                driver.quit()
+                print("✅ Драйвер закрыт")
+            else:
+                print("⏸️ WAITING_FOR_HUMAN_LOGIN")
+                print("   Браузер оставлен открытым для ручного входа.")
+                print("   После логина закройте браузер и перезапустите бота.")
+                # ВАЖНО: НЕ закрываем driver
         else:
             print("❌ Не удалось настроить драйвер")
             
