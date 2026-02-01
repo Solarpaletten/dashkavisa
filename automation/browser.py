@@ -3,13 +3,12 @@
 
 import os
 import time
-import random
 import logging
 import tempfile
-import shutil
 import subprocess
+import shutil
 import datetime
-from pathlib import Path
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -50,6 +49,9 @@ LOGIN_URL = "https://visa.vfsglobal.com/blr/ru/pol/login"
 DASHBOARD_URL = "https://visa.vfsglobal.com/blr/ru/pol/dashboard"
 NEW_BOOKING_URL = "https://visa.vfsglobal.com/blr/ru/pol/book-an-appointment"
 
+# v0.4: Persistent Chrome Profile
+CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".dashkavisa", "chrome_profile")
+
 def cleanup_chrome():
     """Очистка процессов Chrome и временных файлов."""
     try:
@@ -79,6 +81,7 @@ def cleanup_chrome():
 def setup_driver():
     """
     Настраивает и возвращает драйвер браузера Chrome.
+    v0.4: Persistent Chrome Profile (~/.dashkavisa/chrome_profile)
 
     Returns:
         webdriver.Chrome: Настроенный драйвер Chrome или None в случае ошибки
@@ -87,20 +90,19 @@ def setup_driver():
     cleanup_chrome()
 
     try:
-        # Создаем временную директорию для профиля
-        profile_dir = tempfile.mkdtemp(prefix=f"chrome_profile_{int(time.time())}_")
-        logger.info(f"Создана временная директория для профиля: {profile_dir}")
+        # v0.4: Persistent директория (НЕ временная)
+        os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
+        logger.info(f"Используется persistent профиль: {CHROME_PROFILE_DIR}")
 
         # Настраиваем опции Chrome
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument(f"--user-data-dir={profile_dir}")
+        options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--window-size=1920,1080")
 
-        # Режим инкогнито (помогает обойти ограничения сайта)
-        options.add_argument("--incognito")
+        # v0.4: --incognito УБРАН — cookies и Cloudflare tokens должны сохраняться
 
         # Отключаем веб-безопасность для обхода некоторых ограничений
         options.add_argument("--disable-web-security")
@@ -134,108 +136,227 @@ def setup_driver():
         return driver
     except Exception as e:
         logger.error(f"Ошибка при настройке драйвера: {str(e)}")
-        # Очищаем временную директорию при ошибке
-        if 'profile_dir' in locals():
-            try:
-                shutil.rmtree(profile_dir, ignore_errors=True)
-            except:
-                pass
         return None
+
+def accept_cookies_if_present(driver, logger, timeout=5):
+    """
+    v0.4.1: Автоматическое принятие cookie-баннера VFS Global.
+    Вызывается ДО проверки логина, чтобы разблокировать DOM.
+    Пробует несколько XPath с fallback.
+    """
+    xpaths = [
+        "//button[contains(., 'Согласиться с использованием всех файлов cookie')]",
+        "//button[contains(., 'Согласиться')]",
+        "//button[contains(., 'Accept all')]",
+    ]
+    for xp in xpaths:
+        try:
+            btn = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable((By.XPATH, xp))
+            )
+            btn.click()
+            logger.info("Cookie consent accepted automatically")
+            return True
+        except TimeoutException:
+            continue
+    logger.info("Cookie banner not found — skipping")
+    return False
 
 def login_vfs_global(driver):
     """
-    Выполняет вход в аккаунт VFS Global.
-    
-    Args:
-        driver (webdriver.Chrome): Драйвер Chrome
-        
+    v0.4.1: Hybrid Human-Assisted Login (Cloudflare-safe)
+
+    Функция НЕ логинится сама. Проверяет состояние сохранённой сессии.
+    Человек логинится один раз вручную. Бот использует сохранённые cookies.
+
+    Состояния:
+        SUCCESS          → сессия жива, URL не /login → return True
+        WAIT             → Waiting Room до 120с → потом повторная проверка
+        CAPTCHA_REQUIRED → обнаружена капча → лог, return False, браузер НЕ закрывать
+        MANUAL_LOGIN     → форма email/password → лог, return False, браузер НЕ закрывать
+
     Returns:
-        bool: True, если вход успешен, иначе False
+        bool: True если сессия активна и доступен booking flow, иначе False
     """
     try:
-        # Проверяем наличие учетных данных
-        if not VFS_EMAIL or not VFS_PASSWORD:
-            logger.error("Не найдены учетные данные VFS Global в переменных окружения")
-            return False
-        
-        logger.info(f"Открываю страницу авторизации: {LOGIN_URL}")
+        LOGIN_URL = "https://services.vfsglobal.by/blr/ru/pol/login"
+
+        logger.info(f"Opening VFS Global: {LOGIN_URL}")
         driver.get(LOGIN_URL)
-        
-        # Ждем загрузки формы авторизации
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, "mat-input-0"))
-        )
-        
-        # Сохраняем скриншот страницы и исходный код для анализа
-        screenshot_path = os.path.join(screenshots_dir, f"login_page_initial_{int(time.time())}.png")
-        driver.save_screenshot(screenshot_path)
-        
-        # Сохраняем исходный код страницы для анализа
-        source_path = os.path.join(screenshots_dir, f"login_page_source_{int(time.time())}.html")
-        with open(source_path, "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        
-        # Проверяем наличие капчи
-        if "captcha" in driver.page_source.lower() or "recaptcha" in driver.page_source.lower():
-            logger.warning("Обнаружена капча на странице входа!")
-            captcha_screenshot = os.path.join(screenshots_dir, f"captcha_detected_{int(time.time())}.png")
-            driver.save_screenshot(captcha_screenshot)
-            return False
-        
-        # Ввод email и пароля
-        email_input = driver.find_element(By.ID, "mat-input-0")
-        password_input = driver.find_element(By.ID, "mat-input-1")
-        
-        email_input.clear()
-        email_input.send_keys(VFS_EMAIL)
-        logger.info(f"Введен email: {VFS_EMAIL}")
-        
-        password_input.clear()
-        password_input.send_keys(VFS_PASSWORD)
-        logger.info("Введен пароль")
-        
-        # Ищем и нажимаем кнопку входа
-        # Сначала пробуем найти по тексту на русском
-        try:
-            login_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Войти')]"))
-            )
-        except:
-            # Если не найдена кнопка на русском, ищем на английском
-            login_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Login')]"))
-            )
-        
-        login_button.click()
-        logger.info("Нажата кнопка входа")
-        
-        # Ждем перехода на страницу после авторизации
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.url_contains("dashboard")
-            )
-            logger.info("Успешный вход! Перешли на dashboard")
-            
-            # Делаем скриншот дашборда
-            dashboard_screenshot = os.path.join(screenshots_dir, f"dashboard_{int(time.time())}.png")
-            driver.save_screenshot(dashboard_screenshot)
-            
+
+        # Даём странице начать загрузку
+        time.sleep(3)
+
+        # v0.4.1: Принять cookie-баннер (если есть) ДО проверки логина
+        accept_cookies_if_present(driver, logger)
+        time.sleep(1)  # дать DOM обновиться после закрытия баннера
+
+        # ============================================================
+        # v0.4.2: SESSION CHECK — пробуем dashboard напрямую
+        # URL > DOM. Если сессия жива — dashboard откроется.
+        # Login form в DOM не является признаком отсутствия сессии.
+        # ============================================================
+        DASHBOARD_CHECK_URL = "https://services.vfsglobal.by/blr/ru/pol/dashboard"
+        logger.info(f"Checking active session via dashboard: {DASHBOARD_CHECK_URL}")
+        driver.get(DASHBOARD_CHECK_URL)
+        time.sleep(3)
+
+        if "/dashboard" in driver.current_url:
+            logger.info(f"SUCCESS: Active session detected (dashboard)")
             return True
-            
-        except TimeoutException:
-            # Если не перешли на dashboard, проверяем наличие ошибки
-            logger.error("Не удалось перейти на dashboard после входа")
-            error_screenshot = os.path.join(screenshots_dir, f"login_error_{int(time.time())}.png")
-            driver.save_screenshot(error_screenshot)
+
+        # Если dashboard не открылся — вернёмся на login для дальнейших проверок
+        logger.info("Dashboard not accessible, checking login page state...")
+        driver.get(LOGIN_URL)
+        time.sleep(3)
+
+        # ============================================================
+        # КРИТЕРИЙ УСПЕХА №1: URL уже не /login (сессия жива)
+        # ============================================================
+        current_url = driver.current_url
+        if "login" not in current_url:
+            logger.info(f"SUCCESS: Session active, redirected to {current_url}")
+            return True
+
+        # ============================================================
+        # WAITING ROOM: ждём до 120 секунд (БЕЗ взаимодействия)
+        # ============================================================
+        waiting_room_timeout = 120
+        waiting_room_start = time.time()
+        waiting_room_detected = False
+
+        while time.time() - waiting_room_start < waiting_room_timeout:
+            page_source = driver.page_source.lower()
+
+            waiting_room_keywords = [
+                "вы находитесь в очереди",
+                "waiting room",
+                "ожидаемое время ожидания",
+                "expected wait time",
+                "queue-it",
+            ]
+
+            is_waiting_room = any(kw in page_source for kw in waiting_room_keywords)
+
+            if is_waiting_room:
+                if not waiting_room_detected:
+                    waiting_room_detected = True
+                    logger.info("WAIT: Cloudflare Waiting Room detected, waiting up to 120s...")
+
+                time.sleep(5)
+
+                # Проверяем — может уже ушли с /login
+                current_url = driver.current_url
+                if "login" not in current_url:
+                    logger.info(f"SUCCESS: Passed Waiting Room, redirected to {current_url}")
+                    return True
+
+                continue
+            else:
+                # Waiting Room пройден или его не было
+                break
+
+        if waiting_room_detected:
+            elapsed = int(time.time() - waiting_room_start)
+            logger.info(f"Waiting Room phase ended after {elapsed}s")
+
+        # ============================================================
+        # После Waiting Room — проверяем URL ещё раз
+        # ============================================================
+        current_url = driver.current_url
+        if "login" not in current_url:
+            logger.info(f"SUCCESS: Redirected to {current_url}")
+            return True
+
+        # ============================================================
+        # CAPTCHA DETECT (только обнаружение, 0 кликов)
+        # ============================================================
+        page_source = driver.page_source.lower()
+
+        captcha_keywords = [
+            "подтвердите, что вы человек",
+            "verify you are human",
+            "cf-challenge",
+            "cf-turnstile",
+            "captcha",
+            "challenge-platform",
+            "challenge-form",
+        ]
+
+        # Проверяем iframe Cloudflare
+        captcha_iframes = driver.find_elements(By.CSS_SELECTOR,
+            "iframe[src*='challenges'], iframe[src*='captcha'], iframe[src*='cf-'], iframe[src*='turnstile']")
+
+        is_captcha = any(kw in page_source for kw in captcha_keywords) or len(captcha_iframes) > 0
+
+        if is_captcha:
+            logger.warning("=" * 60)
+            logger.warning("CAPTCHA_REQUIRED")
+            logger.warning("Cloudflare CAPTCHA detected.")
+            logger.warning("Please solve CAPTCHA manually in the browser window.")
+            logger.warning("Then restart: python automation/browser.py")
+            logger.warning("Browser left open intentionally.")
+            logger.warning("=" * 60)
+            # Скриншот
+            screenshot_path = os.path.join(screenshots_dir, f"captcha_detected_{int(time.time())}.png")
+            try:
+                driver.save_screenshot(screenshot_path)
+                logger.info(f"Screenshot: {screenshot_path}")
+            except:
+                pass
             return False
-            
-    except Exception as e:
-        logger.error(f"Ошибка при входе в VFS Global: {str(e)}")
-        error_screenshot = os.path.join(screenshots_dir, f"login_exception_{int(time.time())}.png")
+
+        # ============================================================
+        # LOGIN FORM DETECT (сессия истекла → ручной логин)
+        # ============================================================
+        login_form_selectors = [
+            "input[type='email']",
+            "input[type='password']",
+            "#mat-input-0",
+        ]
+
+        login_form_found = False
+        for selector in login_form_selectors:
+            try:
+                driver.find_element(By.CSS_SELECTOR, selector)
+                login_form_found = True
+                break
+            except:
+                continue
+
+        if login_form_found:
+            logger.warning("=" * 60)
+            logger.warning("MANUAL_LOGIN_REQUIRED")
+            logger.warning("Login form detected — session expired or first run.")
+            logger.warning("Please login manually in the browser window:")
+            logger.warning(f"  URL: {LOGIN_URL}")
+            logger.warning(f"  Profile: {CHROME_PROFILE_DIR}")
+            logger.warning("After login, close browser and restart bot.")
+            logger.warning("=" * 60)
+            # Скриншот
+            screenshot_path = os.path.join(screenshots_dir, f"login_form_detected_{int(time.time())}.png")
+            try:
+                driver.save_screenshot(screenshot_path)
+                logger.info(f"Screenshot: {screenshot_path}")
+            except:
+                pass
+            return False
+
+        # ============================================================
+        # UNKNOWN STATE — ничего не распознано
+        # ============================================================
+        logger.warning(f"UNKNOWN_STATE: URL={current_url}")
+        logger.warning("Could not determine page state. Check screenshot.")
+        screenshot_path = os.path.join(screenshots_dir, f"unknown_state_{int(time.time())}.png")
         try:
-            driver.save_screenshot(error_screenshot)
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"Screenshot: {screenshot_path}")
         except:
             pass
+        return False
+
+    except Exception as e:
+        logger.exception(f"Login check error: {e}")
         return False
 
 def start_new_appointment(driver):
