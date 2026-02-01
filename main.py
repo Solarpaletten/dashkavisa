@@ -8,7 +8,7 @@ import time
 import json
 import shutil
 from threading import Thread
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
