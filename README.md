@@ -98,4 +98,23 @@ visa_bot/
 
 Использование, копирование и распространение без разрешения запрещено.
 
+git add main.py
+git commit -m "fix: make slot search dates dynamic for 2026
 
+- Remove hardcoded dates 25.05.2025, 27.05.2025, 02.06.2025
+- Use datetime.today() + timedelta(14/21/35) for dynamic dates
+- Format DD.MM.YYYY preserved
+- Tested 01.02.2026: bot returns 15.02/22.02/08.03.2026
+- Full flow confirmed: /start → slots → booking → link"
+
+# Тег релиза
+git tag -a v0.2-dynamic-dates -m "v0.2: Dynamic slot dates (2026)
+
+Fixed: hardcoded May 2025 dates replaced with dynamic calculation
+Tested: 01.02.2026 - bot correctly shows Feb-Mar 2026 slots
+Files changed: main.py (2 replacements)
+Audited clean: browser.py, date_selector.py"
+
+# Пуш
+git push origin main
+git push origin v0.2-dynamic-dates
