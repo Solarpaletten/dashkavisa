@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import os
+import config
 import time
 import logging
 import tempfile
 import subprocess
 import shutil
 import datetime
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -33,16 +33,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Загрузка учетных данных из .env
-from dotenv import load_dotenv
+
 
 # Загружаем переменные окружения
-load_dotenv()
-VFS_EMAIL = os.getenv("VFS_EMAIL")
-VFS_PASSWORD = os.getenv("VFS_PASSWORD")
-CITY = os.getenv("CITY", "Минск")
-VISA_TYPE = os.getenv("VISA_TYPE", "Шенген виза")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
-MAX_DATES_TO_SHOW = int(os.getenv("MAX_DATES_TO_SHOW", "5"))
+
 
 # URL для страниц VFS Global
 LOGIN_URL = "https://visa.vfsglobal.com/blr/ru/pol/login"
