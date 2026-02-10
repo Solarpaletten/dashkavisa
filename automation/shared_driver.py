@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Общая конфигурация драйвера для всех этапов
+
+setup_driver()  — STAGE 1, 2 (создаёт новый Chrome)
+attach_driver() — STAGE 3, 4 (подключается к существующему Chrome)
 """
 import os
 import time
@@ -87,7 +90,10 @@ def accept_cookies_if_present(driver, timeout=5):
 
 
 def setup_driver():
-    """Настройка драйвера с persistent профилем"""
+    """
+    Создание НОВОГО Chrome с persistent профилем.
+    Использовать ТОЛЬКО в STAGE 1 и STAGE 2.
+    """
     try:
         os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
         
@@ -112,4 +118,45 @@ def setup_driver():
         return driver
     except Exception as e:
         print(f"❌ Ошибка setup: {e}")
+        return None
+
+
+def attach_driver():
+    """
+    Подключение к УЖЕ ОТКРЫТОМУ Chrome через remote debugging port 9222.
+    Использовать ТОЛЬКО в STAGE 3 и STAGE 4.
+    НЕ создаёт новое окно.
+    Автоматически переключается на вкладку с VFS.
+    """
+    try:
+        print("🔌 Attaching to existing Chrome (port 9222)...")
+        
+        options = Options()
+        options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+        
+        driver = webdriver.Chrome(options=options)
+        
+        # Перебираем все вкладки, ищем VFS
+        handles = driver.window_handles
+        print(f"📑 Found {len(handles)} tab(s)")
+        
+        vfs_handle = None
+        for handle in handles:
+            driver.switch_to.window(handle)
+            url = driver.current_url
+            print(f"   Tab: {url}")
+            if "vfsglobal" in url:
+                vfs_handle = handle
+                break
+        
+        if vfs_handle:
+            driver.switch_to.window(vfs_handle)
+            print(f"✅ Attached to VFS tab: {driver.current_url}")
+        else:
+            print(f"⚠️  No VFS tab found. Current: {driver.current_url}")
+        
+        return driver
+    except Exception as e:
+        print(f"❌ Failed to attach to Chrome: {e}")
+        print("   Make sure Stage 1-2 have been run and Chrome is open")
         return None
